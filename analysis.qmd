@@ -13,3 +13,89 @@ library(purrr)
 library(leaflet)
 library(jsonlite)
 ```
+
+```{r}
+raw <- fromJSON("data/wildfires.geojson", simplifyVector = FALSE)
+length(raw$features)
+
+fire <- raw$features[[1]]
+names(fire)
+
+first_coordinate <- fire$geometry$coordinates[[1]][[1]]
+first_coordinate
+```
+
+```{r}
+#| cache: true
+fires <- tibble(features = raw$features) |>
+  unnest_wider(features) |>
+  unnest_wider(properties) |>
+  unnest_wider(geometry, names_sep = "_") |>
+  select(incident, gis_acres, fire_year, agency, state, geometry_coordinates) |>
+  mutate(
+    gis_acres = as.numeric(gis_acres),
+    fire_year = as.integer(fire_year)
+  )
+```
+
+```{r}
+fires |>
+  filter(str_detect(incident, regex("\\bAugust\\b", ignore_case = TRUE))) |>
+  nrow()
+
+fires |>
+  arrange(desc(gis_acres)) |>
+  select(incident, gis_acres) |>
+  slice_head(n = 10)
+```
+
+```{r}
+big_fires <- fires |>
+  filter(gis_acres >= 100000) |>
+  mutate(
+    coordinates = map(geometry_coordinates, \(coordinates) {
+      matrix(unlist(coordinates), ncol = 2, byrow = TRUE)
+    }),
+    lon = map_dbl(coordinates, \(coordinates) mean(coordinates[, 1])),
+    lat = map_dbl(coordinates, \(coordinates) mean(coordinates[, 2]))
+  )
+
+big_fires <- big_fires |>
+  select(-coordinates)
+
+```
+
+```{r}
+top_big_fires <- big_fires |>
+  slice_max(gis_acres, n = 10, with_ties = FALSE)
+
+top_fire_geometries <- sf::st_sfc(
+  map(top_big_fires$geometry_coordinates, \(coordinates) {
+    sf::st_polygon(map(coordinates, \(ring) {
+      matrix(unlist(ring), ncol = 2, byrow = TRUE)
+    }))
+  }),
+  crs = 4326
+)
+
+top_fire_shapes <- sf::st_sf(
+  top_big_fires |> select(-geometry_coordinates),
+  geometry = top_fire_geometries
+)
+
+bounds <- sf::st_bbox(top_fire_shapes)
+lon_padding <- (bounds["xmax"] - bounds["xmin"]) * 0.02
+lat_padding <- (bounds["ymax"] - bounds["ymin"]) * 0.02
+
+leaflet(top_fire_shapes) |>
+  addTiles() |>
+  fitBounds(
+    lng1 = bounds["xmin"] - lon_padding,
+    lat1 = bounds["ymin"] - lat_padding,
+    lng2 = bounds["xmax"] + lon_padding,
+    lat2 = bounds["ymax"] + lat_padding
+  ) |>
+  addPolygons(
+    popup = ~paste(incident, "-", fire_year, "-", round(gis_acres), "acres")
+  )
+```
